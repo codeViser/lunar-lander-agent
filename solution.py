@@ -11,6 +11,7 @@ from gym.spaces import Box, Discrete
 import torch
 from torch.optim import Adam
 import torch.nn as nn
+from torch.distributions.categorical import Categorical
 
 
 def discount_cumsum(x, discount):
@@ -28,7 +29,7 @@ def combined_shape(length, shape=None):
         return (length,)
     return (length, shape) if np.isscalar(shape) else (length, *shape)
 
-def mlp(sizes, activation, output_activation=nn.Identity):
+def mlp(sizes, activation, output_activation=nn.Identity()):
     """
     The basic multilayer perceptron architecture used.
 
@@ -54,7 +55,20 @@ def mlp(sizes, activation, output_activation=nn.Identity):
     # TODO: Implement this function.
     # Hint: Use nn.Sequential to stack multiple layers of the network.
 
-    raise NotImplementedError
+    ### Network architecture
+    mlp = []
+    len_sizes = len(sizes)
+    # hidden layers
+    for l in range(len_sizes-2):
+        mlp.append(nn.Linear(sizes[l], sizes[l+1]))
+        mlp.append(activation)
+        
+    # output layer
+    mlp.append(nn.Linear(sizes[len_sizes-2], sizes[len_sizes-1]))    
+    mlp.append(output_activation)
+    mlp = nn.Sequential(*mlp)
+
+    return mlp
 
 
 class Actor(nn.Module):
@@ -86,7 +100,12 @@ class Actor(nn.Module):
         # Hint: The logits_net returns for a given observation the log 
         # probabilities. You should use them to obtain a Categorical 
         # distribution.
-        raise NotImplementedError
+        
+        # compute logits (supposed output of mlp with linear output activation)
+        logits = self.logits_net(obs)
+        #return the categorical distribution with logits the output of mlp 
+        return Categorical(logits=logits)
+
 
     def _log_prob_from_distribution(self, pi, act):
         """
@@ -109,8 +128,8 @@ class Actor(nn.Module):
         """
 
         # TODO: Implement this function.
-
-        raise NotImplementedError
+        # return the log probabilities of distribution pi at values act
+        return pi.log_prob(act)
 
     def forward(self, obs, act=None):
         """
@@ -135,8 +154,13 @@ class Actor(nn.Module):
         # TODO: Implement this function.
         # Hint: If act is None, log_prob is also None.
 
-        raise NotImplementedError
+        ### combine the two methods above
+        # compute distribution
+        pi = self._distribution(obs)
+        # compute log_prob
+        log_prob = self._log_prob_from_distribution(pi, act)
 
+        return pi, log_prob
 
 class Critic(nn.Module):
     """The network used by the value function."""
@@ -220,8 +244,12 @@ class VPGBuffer:
         assert self.ptr < self.max_size
 
         # TODO: Store new data in the respective buffers.
-
-
+        self.obs_buf[self.ptr] = obs
+        self.act_buf[self.ptr] = act
+        self.rew_buf[self.ptr] = rew
+        self.val_buf[self.ptr] = val
+        self.logp_buf[self.ptr] = logp 
+        
         # Update pointer after data is stored.
         self.ptr += 1
 
@@ -244,28 +272,27 @@ class VPGBuffer:
         # Get the indexes where TD residuals and discounted 
         # rewards-to-go are stored.
         path_slice = slice(self.path_start_idx, self.ptr)
-        
+    
         rews = np.append(self.rew_buf[path_slice], last_val)
         vals = np.append(self.val_buf[path_slice], last_val)
 
-        self.ret_buf[self.ptr:self.path_start_idx] = (
-            np.cumsum(self.rew_buf[self.ptr:self.path_start_idx][::-1])[::-1]
-        )
+        # self.ret_buf[self.ptr:self.path_start_idx] = (
+        #     np.cumsum(self.rew_buf[self.ptr:self.path_start_idx][::-1])[::-1]
+        # )
 
         # TODO: Implement TD residuals calculation.
         # Hint: use the discount_cumsum function 
-        # self.tdres_buf[path_slice] = ...
+        tdres = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
+        self.tdres_buf[path_slice] = tdres
+
 
 
         # TODO: Implement discounted rewards-to-go calculation. 
         # Hint: use the discount_cumsum function 
-        # self.ret_buf[path_slice] = ...
-
+        self.ret_buf[path_slice] = discount_cumsum(self.rew_buf[path_slice], self.gamma) 
 
         # Update the path_start_idx
         self.path_start_idx = self.ptr
-
-        pass
 
 
     def get(self):
@@ -276,7 +303,7 @@ class VPGBuffer:
         assert self.ptr == self.max_size
         self.ptr, self.path_start_idx = 0, 0
 
-        self.tdres_buf = self.tdres_buf
+        #self.tdres_buf = self.tdres_buf
         tdres_mean = np.mean(self.tdres_buf)
         tdres_std = np.std(self.tdres_buf)
         self.tdres_buf = (self.tdres_buf - tdres_mean) / tdres_std
@@ -287,7 +314,7 @@ class VPGBuffer:
 
 
 class Agent:
-    def __init__(self, env, activation=nn.Tanh):
+    def __init__(self, env, activation=nn.Tanh()):
         self.env = env
         self.hid = 64  # layer width of networks
         self.l = 2  # layer number of networks
@@ -318,8 +345,17 @@ class Agent:
         # TODO: Implement this function.
         # Hint: This function is only called during inference. You should use
         # `torch.no_grad` to ensure that it does not interfer with the gradient computation.
+        with torch.no_grad():
+            # compute distribution
+            pi = self.actor._distribution(state)
+            # sample action
+            act = pi.sample()
+            # compute log_prob
+            log_prob = self.actor._log_prob_from_distribution(pi, act)
+            # compute value
+            v = self.critic(state)
 
-        return 0, 0, 0
+        return act, v, log_prob
 
     def act(self, state):
         return self.step(state)[0]
@@ -343,10 +379,12 @@ class Agent:
         """
 
         # TODO: Implement this function.
-        # Currently, this just returns a random action.
+        # compute distribution
+        pi = self.actor._distribution(torch.as_tensor(obs, dtype=torch.float32))
+        # sample action
+        act = pi.sample()
         
-        return np.random.choice([0, 1, 2, 3])
-
+        return act
 
 def train(env, seed=0):
     """
@@ -368,7 +406,7 @@ def train(env, seed=0):
 
     # initialize agent
     agent = Agent(env)
-
+    
     # Training parameters
     # You may wish to change the following settings for the buffer and training
     # Number of training steps per epoch
@@ -399,17 +437,20 @@ def train(env, seed=0):
 
     # Main training loop: collect experience in env and update / log each epoch
     for epoch in range(epochs):
+        # Set up buffer
+        buf = VPGBuffer(obs_dim, act_dim, steps_per_epoch, gamma, lam)
+
         ep_returns = []
         for t in range(steps_per_epoch):
             a, v, logp = agent.step(torch.as_tensor(state, dtype=torch.float32))
 
             next_state, r, terminal = agent.env.transition(a)
-            ep_ret += r
+            ep_ret += r 
             ep_len += 1
-
+            
             # Log transition
-            buf.store(state, a, r, v, logp)
-
+            buf.store(torch.as_tensor(state, dtype=torch.float32), a, r, v, logp)
+            
             # Update state (critical!)
             state = next_state
 
@@ -424,6 +465,7 @@ def train(env, seed=0):
                     v = 0
                 if timeout or terminal:
                     ep_returns.append(ep_ret)  # only store return when episode ended
+                    
                 buf.end_traj(v)
                 state, ep_ret, ep_len = agent.env.reset(), 0, 0
 
@@ -438,19 +480,30 @@ def train(env, seed=0):
         # done for you.
 
         data = buf.get()
-
+       
         # Do 1 policy gradient update
         actor_optimizer.zero_grad() #reset the gradient in the actor optimizer
 
         #Hint: you need to compute a 'loss' such that its derivative with respect to the actor
         # parameters is the policy gradient. Then call loss.backwards() and actor_optimizer.step()
-
+        _, logp = agent.actor(data["obs"], data["act"])
+        loss_actor =  - (logp * data["tdres"]).sum()
+        loss_actor.backward()
+        actor_optimizer.step()
+        
         # We suggest to do 100 iterations of value function updates
+        
         for _ in range(100):
-            critic_optimizer.zero_grad()
             #compute a loss for the value function, call loss.backwards() and then
             #critic_optimizer.step()
-
+            critic_optimizer.zero_grad()
+            # compute values
+            vals = agent.critic(data["obs"])
+            # compute tdres
+            loss_critic = nn.MSELoss()(vals, data["ret"])
+            #print(loss_critic)
+            loss_critic.backward()
+            critic_optimizer.step()
 
     return agent
 

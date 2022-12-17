@@ -7,4 +7,5 @@ WORKDIR /code
 ADD * /code/
 ADD pytransform /code/pytransform
 WORKDIR /code
+RUN mkdir -p /results
 CMD xvfb-run -s "-screen 0 1400x900x24" python -u checker_client.py
